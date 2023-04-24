@@ -1,23 +1,17 @@
-import torch
+'''
+Contains MNIST and CIFAR-10 implementations.
+PyTorch already implements this, but I've reimplemented it here for learning purposes.
+'''
 from torch.utils.data import Dataset
 import numpy as np
 from PIL import Image
-
-def unpickle(file, encoding='bytes'):
-    import pickle
-    with open(file, 'rb') as fo:
-        data_dict = pickle.load(fo, encoding=encoding)
-    return data_dict
+import os
+from utils import unpickle, download_and_extract
 
 class CIFAR10(Dataset):
     def __init__(self, root='data', train=True, transform=None):
-        import requests, tarfile, os
         self.transform = transform
-        if not os.path.exists(os.path.join(root, 'cifar-10-batches-py')):
-            print('Downloading dataset...')
-            url = 'https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz'
-            response = requests.get(url, stream=True)
-            tarfile.open(fileobj=response.raw, mode='r|gz').extractall(path=root)
+        download_and_extract('https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz', root=root)
 
         meta = os.path.join(root, 'cifar-10-batches-py', 'batches.meta')
         self.classes = unpickle(meta, encoding='latin1')['label_names']
@@ -36,5 +30,28 @@ class CIFAR10(Dataset):
         img = Image.fromarray(self.X[index])
         return self.transform(img) if self.transform else img, self.y[index]
     
+    def __len__(self):
+        return len(self.y)
+
+class MNIST(Dataset):
+    def __init__(self, root='data', train=True, transform=None):
+        self.transform = transform
+
+        download_and_extract('http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz', root=root)
+        download_and_extract('http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz', root=root)
+        download_and_extract('http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz', root=root)
+        download_and_extract('http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz', root=root)
+
+        img_filename = f"{'train' if train else 't10k'}-images-idx3-ubyte"
+        label_filename = f"{'train' if train else 't10k'}-labels-idx1-ubyte"
+
+        with open(os.path.join(root, img_filename), 'rb') as f1, open(os.path.join(root, label_filename), 'rb') as f2:
+            self.X = np.frombuffer(f1.read(), dtype=np.uint8, offset=16).reshape(-1, 28, 28)
+            self.y = np.frombuffer(f2.read(), dtype=np.uint8, offset=8)
+
+    def __getitem__(self, index):
+        img = Image.fromarray(self.X[index])
+        return self.transform(img) if self.transform else img, self.y[index]
+
     def __len__(self):
         return len(self.y)
