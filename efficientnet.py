@@ -1,27 +1,45 @@
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 
-class MBConv(nn.Module):
-    def __init__(self, cin, cout, kernel_size, stride, expansion):
+class SqueezeExcitation(nn.Module):
+    def __init__(self, cin, squeeze_channels):
         super().__init__()
-        self.block = nn.Sequential(
-            # expansion (only needed if expansion > 1)
-            *(
-                [nn.Conv2d(cin, expansion * cin, 1, bias=False),
-                nn.BatchNorm2d(expansion * cin),
-                nn.SiLU()] if expansion > 1 else []
-            ),
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(cin, squeeze_channels, 1)
+        self.fc2 = nn.Conv2d(squeeze_channels, cin, 1)
+    def forward(self, x):
+        out = self.avgpool(x)
+        out = F.silu(self.fc1(out))
+        out = F.sigmoid(self.fc2(out))
+        return out * x
 
-            # depthwise conv
-            nn.Conv2d(expansion * cin, expansion * cin, kernel_size, stride=stride, 
-                      padding=(kernel_size-1)//2, groups=expansion * cin, bias=False),
-            nn.BatchNorm2d(expansion * cin),
-            nn.SiLU(),
+class MBConv(nn.Module):
+    def __init__(self, cin, cout, kernel_size, stride, expansion, se_ratio=4):
+        super().__init__()
+        layers = []
+        expanded_channels = expansion * cin
+        if expansion > 1: # expansion (only needed if > 1)
+            layers.append(nn.Sequential(nn.Conv2d(cin, expanded_channels, 1, bias=False),
+                                        nn.BatchNorm2d(expanded_channels),
+                                        nn.SiLU()))
 
-            # reduction
-            nn.Conv2d(expansion * cin, cout, 1, bias=False),
-            nn.BatchNorm2d(cout)
-        )
+        # depthwise conv
+        layers.append(nn.Sequential(nn.Conv2d(expanded_channels, expanded_channels, kernel_size, stride=stride, 
+                                    padding=(kernel_size-1)//2, groups=expanded_channels, bias=False),
+                                    nn.BatchNorm2d(expanded_channels),
+                                    nn.SiLU()))
+        
+        # squeeze and excitation
+        squeeze_channels = cin // se_ratio
+        layers.append(SqueezeExcitation(expanded_channels, squeeze_channels))
+        
+        # reduction
+        layers.append(nn.Sequential(nn.Conv2d(expanded_channels, cout, 1, bias=False),
+                                    nn.BatchNorm2d(cout)))
+        
+        self.block = nn.Sequential(*layers)
+
     def forward(self, x):
         return self.block(x)
 
@@ -29,7 +47,7 @@ class EfficientNetB0(nn.Module):
     def __init__(self):
         super().__init__()
         # input resolution, channels, layers, kernel size
-        self.spec = [
+        self.config = [
             (224, 32, 1, 3), 
             (112, 16, 1, 3),
             (112, 24, 2, 3),
@@ -43,7 +61,7 @@ class EfficientNetB0(nn.Module):
         
         features = []
         # setup stage 1 manually since it uses regular conv 
-        cout = self.spec[0][1]
+        cout = self.config[0][1]
         features += [nn.Sequential(
             nn.Conv2d(3, cout, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(cout),
@@ -51,10 +69,10 @@ class EfficientNetB0(nn.Module):
             ]
 
         expansion = 1
-        for i in range(1, len(self.spec)-1):
-            resolution, cout, layers, kernel_size = self.spec[i]
-            cin = self.spec[i-1][1]
-            next_resolution = self.spec[i+1][0]
+        for i in range(1, len(self.config)-1):
+            resolution, cout, layers, kernel_size = self.config[i]
+            cin = self.config[i-1][1]
+            next_resolution = self.config[i+1][0]
 
             stride = resolution // next_resolution
             features += self.make_mbconv_layers(cin, cout, kernel_size, 
@@ -62,7 +80,7 @@ class EfficientNetB0(nn.Module):
             expansion = 6 # after first MBConv, expansion is 6
         
         # add 1x1 conv at end
-        cin, cout = self.spec[-2][1], self.spec[-1][1]
+        cin, cout = self.config[-2][1], self.config[-1][1]
         features += [nn.Sequential(
             nn.Conv2d(cin, cout, 1, bias=False),
             nn.BatchNorm2d(cout),
@@ -71,7 +89,7 @@ class EfficientNetB0(nn.Module):
         
         self.features = nn.Sequential(*features)
 
-        self.avgpool = nn.AvgPool2d(7)
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Sequential(
             nn.Dropout(0.2),
             nn.Linear(cout, 1000)
